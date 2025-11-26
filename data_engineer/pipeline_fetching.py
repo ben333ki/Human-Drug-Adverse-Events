@@ -6,10 +6,11 @@ import sys
 from sqlalchemy import create_engine, text
 
 # ตรวจสอบการ Import Config
+# ปรับให้ตรงกับ config.py ที่เราสร้าง (ใช้ DB_CONFIG)
 try:
     from config import (
         OPENFDA_URL, LIMIT, GLP1_DRUGS, RAW_DATA_PATH, API_KEY,
-        DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME, TABLE_NAME
+        DB_CONFIG
     )
 except ImportError:
     print("⚠️ Error: config.py not found or missing variables.")
@@ -22,9 +23,17 @@ except ImportError:
 def fetch_openfda_multi_drugs():
     """
     ดึงข้อมูลจาก OpenFDA API ตามรายชื่อยาที่กำหนด
+    รองรับกรณีมีและไม่มี API KEY
     Returns: DataFrame ที่มีข้อมูลดิบ
     """
     print(f"🚀 Starting Extraction Process...")
+    
+    # เช็คสถานะ API Key
+    if API_KEY:
+        print("🔑 API Key detected: Enabled high-limit fetching.")
+    else:
+        print("⚠️ No API Key found: Running in guest mode (Lower limits applied).")
+
     all_records = []
 
     for drug in GLP1_DRUGS:
@@ -34,16 +43,30 @@ def fetch_openfda_multi_drugs():
         while True:
             # Query Construction
             search_query = f'patient.drug.medicinalproduct:"{drug}"'
-            url = f"{OPENFDA_URL}?api_key={API_KEY}&limit={LIMIT}&skip={skip}&search={search_query}"
             
+            # ใช้ params dictionary แทนการต่อ string เพื่อความยืดหยุ่น
+            params = {
+                "limit": LIMIT,
+                "skip": skip,
+                "search": search_query
+            }
+            
+            # ถ้ามี API Key ค่อยเติมเข้าไปใน params
+            if API_KEY:
+                params["api_key"] = API_KEY
+
             try:
-                resp = requests.get(url, timeout=30) # เพิ่ม timeout กันค้าง
+                # ส่ง params เข้าไปใน requests โดยตรง
+                resp = requests.get(OPENFDA_URL, params=params, timeout=30)
             except requests.exceptions.RequestException as e:
                 print(f"❌ Network Error for {drug}: {e}")
                 break
 
             if resp.status_code != 200:
                 print(f"   ⚠️ Finished or Stop at {drug} (Status: {resp.status_code})")
+                # กรณี 429 Too Many Requests ให้แจ้งเตือนชัดเจน
+                if resp.status_code == 429:
+                    print("   🛑 Rate Limit Exceeded! Try adding/checking API Key or slow down.")
                 break
 
             data = resp.json()
@@ -109,26 +132,28 @@ def load_data_to_postgres(df):
         print("⚠️ DataFrame is empty. Skipping Load step.")
         return
 
-    print(f"💾 Loading data to PostgreSQL table: '{TABLE_NAME}' ...")
+    # ดึงค่าจาก Dictionary DB_CONFIG
+    table = DB_CONFIG['table_name']
+    print(f"💾 Loading data to PostgreSQL table: '{table}' ...")
     
     try:
-        # Create Connection String
-        url = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+        # Create Connection String จาก DB_CONFIG
+        url = f"postgresql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
         engine = create_engine(url)
 
         # Write to DB
-        # if_exists='replace': สำหรับ Raw Data เรามักจะ Truncate แล้วลงใหม่ หรือ 'append' แล้วแต่นโยบาย
-        df.to_sql(TABLE_NAME, engine, if_exists="replace", index=False)
+        df.to_sql(table, engine, if_exists="replace", index=False)
         
         # Verify Count
         with engine.connect() as conn:
-            result = conn.execute(text(f"SELECT COUNT(*) FROM {TABLE_NAME}"))
+            result = conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
             count = result.scalar()
             print(f"✅ Successfully loaded {count} records to DB.")
             
     except Exception as e:
         print(f"❌ Error loading data to DB: {e}")
-        raise e
+        # ไม่ raise e เพื่อให้ Pipeline จบสวยๆ แต่แจ้ง error แล้ว
+        sys.exit(1) 
 
 # ==========================================
 # 3. Main Pipeline Runner

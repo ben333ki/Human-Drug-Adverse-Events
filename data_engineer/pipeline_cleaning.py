@@ -6,9 +6,10 @@ import sys
 
 # Import Config (ตรวจสอบว่าไฟล์ config.py อยู่โฟลเดอร์เดียวกันหรือ PYTHONPATH ถูกต้อง)
 try:
-    from config import DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME, TABLE_NAME
+    # ปรับ Import ให้เรียกใช้ DB_CONFIG ตามโครงสร้างใหม่
+    from config import DB_CONFIG
 except ImportError:
-    print("⚠️ Error: config.py not found. Please make sure config.py exists.")
+    print("⚠️ Error: config.py not found or missing variables. Please make sure config.py exists.")
     sys.exit(1)
 
 # ==========================================
@@ -52,7 +53,8 @@ TARGET_TABLE_NAME = "glp1_clean"
 
 def get_db_engine():
     """สร้าง Connection Engine ไปยัง PostgreSQL"""
-    url = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    # ปรับมาใช้ค่าจาก Dictionary DB_CONFIG
+    url = f"postgresql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
     return create_engine(url)
 
 def convert_to_years(row):
@@ -100,63 +102,70 @@ def clean_drug_route(val):
 
 def run_data_cleaning_pipeline():
     print("🚀 Starting Data Cleaning Pipeline...")
-    engine = get_db_engine()
-
-    # --- Step 1: Load Data ---
-    print(f"📥 Loading raw data from table: {TABLE_NAME}")
-    df = pd.read_sql(f"SELECT * FROM {TABLE_NAME}", engine)
-    print(f"   Initial Shape: {df.shape}")
-
-    # --- Step 2: Clean Seriousness ---
-    print("🧹 Cleaning Seriousness...")
-    df["seriousness"] = pd.to_numeric(df["seriousness"], errors='coerce').fillna(2)
-    df["seriousness"] = df["seriousness"].map({1: 1, 2: 0}).astype(int)
-
-    # --- Step 3: Clean Sex ---
-    print("🧹 Cleaning Sex...")
-    df["sex"] = df["sex"].astype("float").map({1.0: "M", 2.0: "F", 0.0: "Unknown"}).fillna("Unknown")
-
-    # --- Step 4: Clean & Normalize Age ---
-    print("🧹 Cleaning Age...")
-    df['age_years'] = df.apply(convert_to_years, axis=1).round(2)
-    # Filter valid age (0-120 years)
-    before_filter = len(df)
-    df = df[df['age_years'].between(0, 120)]
-    print(f"   Dropped {before_filter - len(df)} rows with invalid age.")
-
-    # --- Step 5: Clean Drug Route ---
-    print("🧹 Cleaning Drug Route...")
-    df["drug_route"] = df["drug_route"].apply(clean_drug_route)
-
-    # --- Step 6: Clean Reaction & Dates ---
-    print("🧹 Cleaning Reaction & Dates...")
-    df["reaction"] = df["reaction"].astype(str).str.title().str.strip()
-    df["receivedate"] = pd.to_datetime(df["receivedate"], format="%Y%m%d", errors="coerce")
-
-    # --- Step 7: Final Validations ---
-    print("🔍 Final Validation...")
-    critical_cols = ["reaction", "seriousness", "age_years", "receivedate"]
-    df_clean = df.dropna(subset=critical_cols).copy()
     
-    # Reorder Columns
-    final_cols_order = ['receivedate', 'drug_name', 'drug_route', 'sex', 'age_years', 'reaction', 'seriousness']
-    available_cols = [c for c in final_cols_order if c in df_clean.columns]
-    df_clean = df_clean[available_cols]
-
-    print(f"   Original Shape: {df.shape}")
-    print(f"   Final Clean Shape: {df_clean.shape}")
-
-    # --- Step 8: Save Outputs ---
-    
-    # 8.1 Save to CSV
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    csv_path = os.path.join(OUTPUT_DIR, OUTPUT_CSV_FILENAME)
-    df_clean.to_csv(csv_path, index=False)
-    print(f"✅ Saved CSV to: {csv_path}")
-
-    # 8.2 Save to Database
-    print(f"💾 Saving to PostgreSQL table: {TARGET_TABLE_NAME}...")
     try:
+        engine = get_db_engine()
+        source_table = DB_CONFIG['table_name']
+
+        # --- Step 1: Load Data ---
+        print(f"📥 Loading raw data from table: {source_table}")
+        df = pd.read_sql(f"SELECT * FROM {source_table}", engine)
+        print(f"   Initial Shape: {df.shape}")
+
+        if df.empty:
+            print("⚠️ Warning: Source table is empty. Aborting pipeline.")
+            return
+
+        # --- Step 2: Clean Seriousness ---
+        print("🧹 Cleaning Seriousness...")
+        df["seriousness"] = pd.to_numeric(df["seriousness"], errors='coerce').fillna(2)
+        df["seriousness"] = df["seriousness"].map({1: 1, 2: 0}).astype(int)
+
+        # --- Step 3: Clean Sex ---
+        print("🧹 Cleaning Sex...")
+        df["sex"] = df["sex"].astype("float").map({1.0: "M", 2.0: "F", 0.0: "Unknown"}).fillna("Unknown")
+
+        # --- Step 4: Clean & Normalize Age ---
+        print("🧹 Cleaning Age...")
+        df['age_years'] = df.apply(convert_to_years, axis=1).round(2)
+        # Filter valid age (0-120 years)
+        before_filter = len(df)
+        df = df[df['age_years'].between(0, 120)]
+        print(f"   Dropped {before_filter - len(df)} rows with invalid age.")
+
+        # --- Step 5: Clean Drug Route ---
+        print("🧹 Cleaning Drug Route...")
+        df["drug_route"] = df["drug_route"].apply(clean_drug_route)
+
+        # --- Step 6: Clean Reaction & Dates ---
+        print("🧹 Cleaning Reaction & Dates...")
+        df["reaction"] = df["reaction"].astype(str).str.title().str.strip()
+        df["receivedate"] = pd.to_datetime(df["receivedate"], format="%Y%m%d", errors="coerce")
+
+        # --- Step 7: Final Validations ---
+        print("🔍 Final Validation...")
+        critical_cols = ["reaction", "seriousness", "age_years", "receivedate"]
+        df_clean = df.dropna(subset=critical_cols).copy()
+        
+        # Reorder Columns
+        final_cols_order = ['receivedate', 'drug_name', 'drug_route', 'sex', 'age_years', 'reaction', 'seriousness']
+        available_cols = [c for c in final_cols_order if c in df_clean.columns]
+        df_clean = df_clean[available_cols]
+
+        print(f"   Original Shape: {df.shape}")
+        print(f"   Final Clean Shape: {df_clean.shape}")
+
+        # --- Step 8: Save Outputs ---
+        
+        # 8.1 Save to CSV
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        csv_path = os.path.join(OUTPUT_DIR, OUTPUT_CSV_FILENAME)
+        df_clean.to_csv(csv_path, index=False)
+        print(f"✅ Saved CSV to: {csv_path}")
+
+        # 8.2 Save to Database
+        print(f"💾 Saving to PostgreSQL table: {TARGET_TABLE_NAME}...")
+        
         df_clean.to_sql(TARGET_TABLE_NAME, engine, if_exists='replace', index=False)
         
         # Verify
@@ -165,11 +174,11 @@ def run_data_cleaning_pipeline():
             count = result.scalar()
             print(f"✅ Saved successfully! Rows in DB: {count}")
             
-    except Exception as e:
-        print(f"❌ Error saving to DB: {e}")
-        raise e # Raise error เพื่อให้ Airflow รู้ว่า Task Failed
+        print("🎉 Pipeline Finished Successfully!")
 
-    print("🎉 Pipeline Finished Successfully!")
+    except Exception as e:
+        print(f"❌ Pipeline Failed: {e}")
+        sys.exit(1) # Raise error code for Airflow/Orchestrator
 
 # ==========================================
 # 4. Execution Entry Point

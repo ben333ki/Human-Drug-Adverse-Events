@@ -81,6 +81,3 @@ def predict_risk(data: PatientData):
 def health_check():
     return {"status": "running", "model_loaded": True}
 
-# วิธีรัน (พิมพ์ใน Terminal):
-# uvicorn api:app --reload
-# python -m uvicorn api:app --reload
